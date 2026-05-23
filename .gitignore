@@ -1,0 +1,38 @@
+# Python virtual environments
+.venv/
+venv/
+env/
+
+# Python cache
+__pycache__/
+*.py[cod]
+*$py.class
+
+# PyCharm
+.idea/
+
+# VS Code
+.vscode/
+
+# Environment/config secrets
+.env
+*.env
+
+# Logs
+*.log
+logs/
+
+# Build artifacts
+artifacts/
+build/
+dist/
+
+# Unreal generated folders
+Binaries/
+Intermediate/
+Saved/
+DerivedDataCache/
+
+# OS files
+.DS_Store
+Thumbs.db
