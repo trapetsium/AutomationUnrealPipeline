@@ -1,0 +1,14 @@
+{
+  "worker_name": "local-home-pc",
+  "backend_url": "http://127.0.0.1:8010",
+  "poll_interval_seconds": 2,
+  "process_timeout_seconds": 60,
+  "engines": {
+    "4.27": {
+      "editor_cmd": "F:/Path/To/UE_4.27/Engine/Binaries/Win64/UE4Editor-Cmd.exe"
+    },
+    "5.5": {
+      "editor_cmd": "F:/Path/To/UE_5.5/Engine/Binaries/Win64/UnrealEditor-Cmd.exe"
+    }
+  }
+}
