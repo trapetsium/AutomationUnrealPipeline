@@ -1,35 +1,61 @@
+import json
 import subprocess
 import time
+from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 import requests
 
 
-# URL backend-сервера.
-# Сейчас backend запущен локально на домашнем ПК.
-# Позже здесь будет адрес арендованного сервера, например:
-# BACKEND_URL = "https://your-server-domain.com"
-BACKEND_URL = "http://127.0.0.1:8010"
+# Абсолютный путь к корню проекта:
+# F:\Dev\AutomationUnrealPipeline
+PROJECT_ROOT = Path(__file__).resolve().parent.parent
 
 
-# Имя текущего worker'а.
-# В будущем backend сможет видеть несколько worker'ов:
-# - home-pc-main
-# - build-machine-01
-# - render-worker-02
-WORKER_NAME = "local-home-pc"
+# Локальный config worker'а.
+# Этот файл НЕ коммитим в Git, потому что позже в нём будут:
+# - реальные пути к UE на твоём ПК;
+# - адрес VPS backend;
+# - worker token.
+CONFIG_PATH = PROJECT_ROOT / "config" / "worker.local.json"
 
 
-# Как часто worker спрашивает backend: "Есть ли новая задача?"
-# Это простой polling-подход. Для MVP он лучше WebSocket:
-# проще отлаживать, меньше скрытой магии.
-POLL_INTERVAL_SECONDS = 2
+def load_worker_config() -> Dict[str, Any]:
+    """
+    Загружает настройки worker'а из config/worker.local.json.
+
+    Почему config отдельно от кода:
+    - код остаётся одинаковым на всех машинах;
+    - пути к UE могут отличаться;
+    - backend_url может быть локальным или серверным;
+    - секреты не попадают в Git.
+    """
+
+    if not CONFIG_PATH.exists():
+        raise FileNotFoundError(
+            f"Worker config not found: {CONFIG_PATH}. "
+            f"Create it from config/worker.local.example.json"
+        )
+
+    with CONFIG_PATH.open("r", encoding="utf-8") as config_file:
+        return json.load(config_file)
 
 
-# Максимальное время выполнения внешнего процесса.
-# Нужна защита, чтобы зависший процесс не держал worker бесконечно.
-# Для Unreal-задач позже увеличим таймаут или сделаем его частью payload.
-PROCESS_TIMEOUT_SECONDS = 60
+CONFIG = load_worker_config()
+
+
+# Эти значения теперь берутся из config-файла, а не зашиты в код.
+BACKEND_URL = CONFIG["backend_url"]
+WORKER_NAME = CONFIG["worker_name"]
+
+POLL_INTERVAL_SECONDS = CONFIG.get("poll_interval_seconds", 2)
+PROCESS_TIMEOUT_SECONDS = CONFIG.get("process_timeout_seconds", 60)
+
+
+# Пока engines не используются напрямую.
+# На следующем этапе добавим job check_engine_path,
+# который проверит существование UnrealEditor-Cmd.exe / UE4Editor-Cmd.exe.
+ENGINES = CONFIG.get("engines", {})
 
 
 def log(job_id: str, message: str) -> None:

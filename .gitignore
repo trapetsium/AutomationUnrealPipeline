@@ -36,3 +36,6 @@ DerivedDataCache/
 # OS files
 .DS_Store
 Thumbs.db
+
+# Local worker config
+config/worker.local.json
