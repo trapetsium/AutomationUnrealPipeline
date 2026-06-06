@@ -369,6 +369,81 @@ def execute_run_process_job(job: Dict[str, Any]) -> None:
         )
 
 
+def execute_check_engine_path_job(job: Dict[str, Any]) -> None:
+    """
+    Проверяет, что worker видит исполняемый файл Unreal Engine.
+
+    Это первый Unreal-specific шаг pipeline.
+
+    Backend говорит:
+        engine_version = "5.5"
+
+    Worker смотрит в config/worker.local.json:
+        engines["5.5"]["editor_cmd"]
+
+    Потом проверяет:
+        существует ли этот файл на диске.
+
+    Мы пока не запускаем Unreal.
+    Только проверяем, что путь корректный.
+    """
+
+    job_id = job["id"]
+
+    try:
+        update_status(job_id, "running")
+
+        engine_version = job.get("engine_version")
+
+        if not engine_version:
+            raise ValueError("engine_version is required for check_engine_path job")
+
+        engine_config = ENGINES.get(engine_version)
+
+        if not engine_config:
+            raise ValueError(f"Engine version '{engine_version}' is not configured in worker.local.json")
+
+        editor_cmd = engine_config.get("editor_cmd")
+
+        if not editor_cmd:
+            raise ValueError(f"editor_cmd is missing for engine version '{engine_version}'")
+
+        editor_path = Path(editor_cmd)
+
+        log(job_id, "[Worker] Starting check_engine_path job")
+        log(job_id, f"[Worker] Engine version: {engine_version}")
+        log(job_id, f"[Worker] Editor command path: {editor_path}")
+
+        exists = editor_path.exists()
+        is_file = editor_path.is_file()
+
+        result = {
+            "worker": WORKER_NAME,
+            "engine_version": engine_version,
+            "editor_cmd": str(editor_path),
+            "exists": exists,
+            "is_file": is_file,
+        }
+
+        if exists and is_file:
+            log(job_id, "[Worker] Engine executable found")
+            complete_job(job_id, result)
+        else:
+            log(job_id, "[Worker] Engine executable not found")
+
+            result["error"] = "Editor command not found"
+            fail_job(job_id, result)
+
+    except Exception as error:
+        fail_job(
+            job_id,
+            {
+                "worker": WORKER_NAME,
+                "error": str(error),
+            },
+        )
+
+
 def dispatch_job(job: Dict[str, Any]) -> None:
     """
     Центральный диспетчер job-типов.
@@ -400,6 +475,10 @@ def dispatch_job(job: Dict[str, Any]) -> None:
 
     if job_type == "run_process":
         execute_run_process_job(job)
+        return
+
+    if job_type == "check_engine_path":
+        execute_check_engine_path_job(job)
         return
 
     # Если backend прислал неизвестный тип job,
