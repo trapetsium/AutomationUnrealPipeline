@@ -443,6 +443,140 @@ def execute_check_engine_path_job(job: Dict[str, Any]) -> None:
             },
         )
 
+def execute_launch_engine_version_job(job: Dict[str, Any]) -> None:
+    """
+    Запускает Unreal Engine executable для указанной версии движка.
+
+    Это следующий шаг после check_engine_path.
+
+    check_engine_path проверял:
+        существует ли UnrealEditor-Cmd.exe / UE4Editor-Cmd.exe
+
+    launch_engine_version проверяет:
+        можем ли мы реально запустить этот .exe через worker
+
+    На этом этапе мы НЕ запускаем .uproject и НЕ запускаем Commandlet.
+    Мы используем безопасный аргумент -help, чтобы проверить сам запуск процесса.
+    """
+
+    job_id = job["id"]
+
+    try:
+        update_status(job_id, "running")
+
+        engine_version = job.get("engine_version")
+
+        if not engine_version:
+            raise ValueError("engine_version is required for launch_engine_version job")
+
+        engine_config = ENGINES.get(engine_version)
+
+        if not engine_config:
+            raise ValueError(f"Engine version '{engine_version}' is not configured in worker.local.json")
+
+        editor_cmd = engine_config.get("editor_cmd")
+
+        if not editor_cmd:
+            raise ValueError(f"editor_cmd is missing for engine version '{engine_version}'")
+
+        editor_path = Path(editor_cmd)
+
+        if not editor_path.exists() or not editor_path.is_file():
+            raise FileNotFoundError(f"Editor executable not found: {editor_path}")
+
+        payload = job.get("payload", {})
+
+        # По умолчанию запускаем движок с -help.
+        # Это безопасный smoke-test: процесс должен стартовать, вывести help/log и завершиться.
+        args = payload.get("args", ["-help"])
+
+        if not isinstance(args, list):
+            raise ValueError("payload.args must be a list of strings")
+
+        for arg in args:
+            if not isinstance(arg, str):
+                raise ValueError("Every payload.args item must be a string")
+
+        # Для первого запуска Unreal может быть медленнее обычного,
+        # поэтому даём возможность переопределить timeout из payload.
+        timeout_seconds = payload.get("timeout_seconds", 120)
+
+        if not isinstance(timeout_seconds, int):
+            raise ValueError("payload.timeout_seconds must be an integer")
+
+        command = [str(editor_path)] + args
+
+        log(job_id, "[Worker] Starting launch_engine_version job")
+        log(job_id, f"[Worker] Engine version: {engine_version}")
+        log(job_id, f"[Worker] Editor executable: {editor_path}")
+        log(job_id, f"[Worker] Launch args: {args}")
+        log(job_id, f"[Worker] Timeout seconds: {timeout_seconds}")
+
+        process = subprocess.Popen(
+            command,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            text=True,
+            shell=False,
+        )
+
+        captured_output: List[str] = []
+
+        try:
+            if process.stdout is not None:
+                for line in process.stdout:
+                    clean_line = line.rstrip()
+                    captured_output.append(clean_line)
+
+                    # Не спамим слишком сильно: Unreal может выводить много строк.
+                    # Но на текущем этапе полезно видеть хотя бы основной stdout.
+                    log(job_id, f"[Unreal] {clean_line}")
+
+            exit_code = process.wait(timeout=timeout_seconds)
+
+        except subprocess.TimeoutExpired:
+            process.kill()
+
+            log(job_id, "[Worker] Unreal process timeout. Process killed.")
+
+            fail_job(
+                job_id,
+                {
+                    "worker": WORKER_NAME,
+                    "engine_version": engine_version,
+                    "editor_cmd": str(editor_path),
+                    "args": args,
+                    "error": "Unreal process timeout",
+                    "timeout_seconds": timeout_seconds,
+                    "output_tail": captured_output[-30:],
+                },
+            )
+            return
+
+        log(job_id, f"[Worker] Unreal process finished with exit code: {exit_code}")
+
+        result = {
+            "worker": WORKER_NAME,
+            "engine_version": engine_version,
+            "editor_cmd": str(editor_path),
+            "args": args,
+            "exit_code": exit_code,
+            "output_tail": captured_output[-30:],
+        }
+
+        if exit_code == 0:
+            complete_job(job_id, result)
+        else:
+            fail_job(job_id, result)
+
+    except Exception as error:
+        fail_job(
+            job_id,
+            {
+                "worker": WORKER_NAME,
+                "error": str(error),
+            },
+        )
 
 def dispatch_job(job: Dict[str, Any]) -> None:
     """
@@ -479,6 +613,10 @@ def dispatch_job(job: Dict[str, Any]) -> None:
 
     if job_type == "check_engine_path":
         execute_check_engine_path_job(job)
+        return
+
+    if job_type == "launch_engine_version":
+        execute_launch_engine_version_job(job)
         return
 
     # Если backend прислал неизвестный тип job,
