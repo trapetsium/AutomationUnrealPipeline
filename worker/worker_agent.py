@@ -52,11 +52,12 @@ POLL_INTERVAL_SECONDS = CONFIG.get("poll_interval_seconds", 2)
 PROCESS_TIMEOUT_SECONDS = CONFIG.get("process_timeout_seconds", 60)
 
 
-# Пока engines не используются напрямую.
-# На следующем этапе добавим job check_engine_path,
-# который проверит существование UnrealEditor-Cmd.exe / UE4Editor-Cmd.exe.
+
 ENGINES = CONFIG.get("engines", {})
 
+# Houdini executable registry.
+# Реальные пути берутся из config/worker.local.json.
+HOUDINI = CONFIG.get("houdini", {})
 
 def log(job_id: str, message: str) -> None:
     """
@@ -370,23 +371,7 @@ def execute_run_process_job(job: Dict[str, Any]) -> None:
 
 
 def execute_check_engine_path_job(job: Dict[str, Any]) -> None:
-    """
-    Проверяет, что worker видит исполняемый файл Unreal Engine.
 
-    Это первый Unreal-specific шаг pipeline.
-
-    Backend говорит:
-        engine_version = "5.5"
-
-    Worker смотрит в config/worker.local.json:
-        engines["5.5"]["editor_cmd"]
-
-    Потом проверяет:
-        существует ли этот файл на диске.
-
-    Мы пока не запускаем Unreal.
-    Только проверяем, что путь корректный.
-    """
 
     job_id = job["id"]
 
@@ -442,6 +427,171 @@ def execute_check_engine_path_job(job: Dict[str, Any]) -> None:
                 "error": str(error),
             },
         )
+
+
+def execute_check_houdini_path_job(job: Dict[str, Any]) -> None:
+    """
+    Проверяет, что worker видит Houdini executables:
+    - hython.exe
+    - hbatch.exe
+    """
+
+    job_id = job["id"]
+
+    try:
+        update_status(job_id, "running")
+
+        hython_path_value = HOUDINI.get("hython")
+        hbatch_path_value = HOUDINI.get("hbatch")
+
+        if not hython_path_value:
+            raise ValueError("houdini.hython is missing in worker.local.json")
+
+        if not hbatch_path_value:
+            raise ValueError("houdini.hbatch is missing in worker.local.json")
+
+        hython_path = Path(hython_path_value)
+        hbatch_path = Path(hbatch_path_value)
+
+        log(job_id, "[Worker] Starting check_houdini_path job")
+        log(job_id, f"[Worker] hython path: {hython_path}")
+        log(job_id, f"[Worker] hbatch path: {hbatch_path}")
+
+        hython_exists = hython_path.exists() and hython_path.is_file()
+        hbatch_exists = hbatch_path.exists() and hbatch_path.is_file()
+
+        result = {
+            "worker": WORKER_NAME,
+            "hython": str(hython_path),
+            "hbatch": str(hbatch_path),
+            "hython_exists": hython_exists,
+            "hbatch_exists": hbatch_exists,
+        }
+
+        if hython_exists and hbatch_exists:
+            log(job_id, "[Worker] Houdini executables found")
+            complete_job(job_id, result)
+        else:
+            log(job_id, "[Worker] Houdini executables not found")
+            result["error"] = "One or more Houdini executables were not found"
+            fail_job(job_id, result)
+
+    except Exception as error:
+        fail_job(
+            job_id,
+            {
+                "worker": WORKER_NAME,
+                "error": str(error),
+            },
+        )
+
+def execute_run_houdini_version_job(job: Dict[str, Any]) -> None:
+    """
+    Запускает hython.exe и получает версию Houdini через Python API.
+
+    Это Houdini runtime smoke test:
+    - проверяем не только существование файла;
+    - проверяем, что hython реально стартует;
+    - проверяем, что доступен модуль hou;
+    - получаем версию Houdini.
+
+    Это foundation для будущих задач:
+    - cook_hda
+    - run_pdg_graph
+    - export_niagara_cache
+    - generate_fx_variants
+    """
+
+    job_id = job["id"]
+
+    try:
+        update_status(job_id, "running")
+
+        hython_path_value = HOUDINI.get("hython")
+
+        if not hython_path_value:
+            raise ValueError("houdini.hython is missing in worker.local.json")
+
+        hython_path = Path(hython_path_value)
+
+        if not hython_path.exists() or not hython_path.is_file():
+            raise FileNotFoundError(f"hython executable not found: {hython_path}")
+
+        payload = job.get("payload", {})
+        timeout_seconds = payload.get("timeout_seconds", 120)
+
+        if not isinstance(timeout_seconds, int):
+            raise ValueError("payload.timeout_seconds must be an integer")
+
+        command = [
+            str(hython_path),
+            "-c",
+            "import hou; print('Houdini version:', hou.applicationVersionString())"
+        ]
+
+        log(job_id, "[Worker] Starting run_houdini_version job")
+        log(job_id, f"[Worker] hython executable: {hython_path}")
+        log(job_id, f"[Worker] Command: {command}")
+        log(job_id, f"[Worker] Timeout seconds: {timeout_seconds}")
+
+        process = subprocess.Popen(
+            command,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            text=True,
+            shell=False,
+        )
+
+        captured_output: List[str] = []
+
+        try:
+            if process.stdout is not None:
+                for line in process.stdout:
+                    clean_line = line.rstrip()
+                    captured_output.append(clean_line)
+                    log(job_id, f"[Houdini] {clean_line}")
+
+            exit_code = process.wait(timeout=timeout_seconds)
+
+        except subprocess.TimeoutExpired:
+            process.kill()
+
+            log(job_id, "[Worker] Houdini process timeout. Process killed.")
+
+            fail_job(
+                job_id,
+                {
+                    "worker": WORKER_NAME,
+                    "error": "Houdini process timeout",
+                    "timeout_seconds": timeout_seconds,
+                    "output_tail": captured_output[-30:],
+                },
+            )
+            return
+
+        log(job_id, f"[Worker] Houdini process finished with exit code: {exit_code}")
+
+        result = {
+            "worker": WORKER_NAME,
+            "hython": str(hython_path),
+            "exit_code": exit_code,
+            "output_tail": captured_output[-30:],
+        }
+
+        if exit_code == 0:
+            complete_job(job_id, result)
+        else:
+            fail_job(job_id, result)
+
+    except Exception as error:
+        fail_job(
+            job_id,
+            {
+                "worker": WORKER_NAME,
+                "error": str(error),
+            },
+        )
+
 
 def execute_launch_engine_version_job(job: Dict[str, Any]) -> None:
     """
@@ -578,6 +728,99 @@ def execute_launch_engine_version_job(job: Dict[str, Any]) -> None:
             },
         )
 
+def execute_launch_uproject_job(job: Dict[str, Any]) -> None:
+    """
+    Открывает конкретный .uproject через выбранную версию Unreal Engine.
+
+    Это interactive/editor-mode запуск:
+    - используется UnrealEditor.exe / UE4Editor.exe
+    - проект открывается визуально
+    - worker не ждёт закрытия редактора
+    - в result возвращается PID процесса
+
+    Для настоящих commandlet/build/cook задач позже будем использовать editor_cmd.
+    """
+
+    job_id = job["id"]
+
+    try:
+        update_status(job_id, "running")
+
+        engine_version = job.get("engine_version")
+        if not engine_version:
+            raise ValueError("engine_version is required for launch_uproject job")
+
+        engine_config = ENGINES.get(engine_version)
+        if not engine_config:
+            raise ValueError(f"Engine version '{engine_version}' is not configured in worker.local.json")
+
+        editor = engine_config.get("editor")
+        if not editor:
+            raise ValueError(f"editor is missing for engine version '{engine_version}'")
+
+        editor_path = Path(editor)
+        if not editor_path.exists() or not editor_path.is_file():
+            raise FileNotFoundError(f"Editor executable not found: {editor_path}")
+
+        payload = job.get("payload", {})
+        uproject_path_value = payload.get("uproject_path")
+
+        if not uproject_path_value:
+            raise ValueError("payload.uproject_path is required")
+
+        uproject_path = Path(uproject_path_value)
+
+        if not uproject_path.exists() or not uproject_path.is_file():
+            raise FileNotFoundError(f"uproject file not found: {uproject_path}")
+
+        extra_args = payload.get("args", [])
+        if not isinstance(extra_args, list):
+            raise ValueError("payload.args must be a list of strings")
+
+        for arg in extra_args:
+            if not isinstance(arg, str):
+                raise ValueError("Every payload.args item must be a string")
+
+        command = [str(editor_path), str(uproject_path)] + extra_args
+
+        log(job_id, "[Worker] Starting launch_uproject job")
+        log(job_id, f"[Worker] Engine version: {engine_version}")
+        log(job_id, f"[Worker] Editor executable: {editor_path}")
+        log(job_id, f"[Worker] Project path: {uproject_path}")
+        log(job_id, f"[Worker] Launch command: {command}")
+
+        process = subprocess.Popen(
+            command,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            shell=False,
+        )
+
+        log(job_id, f"[Worker] Unreal project launch requested. PID: {process.pid}")
+
+        complete_job(
+            job_id,
+            {
+                "worker": WORKER_NAME,
+                "engine_version": engine_version,
+                "editor": str(editor_path),
+                "uproject_path": str(uproject_path),
+                "pid": process.pid,
+                "started": True,
+                "mode": "editor",
+            },
+        )
+
+    except Exception as error:
+        fail_job(
+            job_id,
+            {
+                "worker": WORKER_NAME,
+                "error": str(error),
+            },
+        )
+
+
 def dispatch_job(job: Dict[str, Any]) -> None:
     """
     Центральный диспетчер job-типов.
@@ -617,6 +860,18 @@ def dispatch_job(job: Dict[str, Any]) -> None:
 
     if job_type == "launch_engine_version":
         execute_launch_engine_version_job(job)
+        return
+
+    if job_type == "launch_uproject":
+        execute_launch_uproject_job(job)
+        return
+
+    if job_type == "check_houdini_path":
+        execute_check_houdini_path_job(job)
+        return
+
+    if job_type == "run_houdini_version":
+        execute_run_houdini_version_job(job)
         return
 
     # Если backend прислал неизвестный тип job,

@@ -23,6 +23,19 @@ class JobCreateRequest(BaseModel):
     payload: Dict = Field(default_factory=dict)
 
 
+class UnrealEngineLaunchRequest(BaseModel):
+    engine_version: str = Field(
+        ...,
+        description="Configured Unreal Engine version, for example 4.27 or 5.5",
+        examples=["5.5"],
+    )
+
+    args: List[str] = Field(
+        default_factory=lambda: ["-help"],
+        description="Additional command-line arguments passed to Unreal Editor",
+    )
+
+
 class Job(BaseModel):
     id: str
     type: str
@@ -58,6 +71,33 @@ def create_job(request: JobCreateRequest):
 
     jobs[job_id] = job
     return job
+
+@app.post("/unreal/launch-engine")
+def launch_unreal_engine(request: UnrealEngineLaunchRequest):
+    """
+    Создаёт pipeline job для запуска выбранной версии Unreal Engine.
+
+    FastAPI НЕ запускает Unreal напрямую.
+
+    Архитектура:
+        API
+          -> queued job
+          -> local worker
+          -> UnrealEditor-Cmd.exe / UE4Editor-Cmd.exe
+
+    Это позволяет backend находиться даже на отдельном сервере,
+    в то время как Unreal установлен только на worker-машине.
+    """
+
+    job_request = JobCreateRequest(
+        type="launch_engine_version",
+        engine_version=request.engine_version,
+        payload={
+            "args": request.args,
+        },
+    )
+
+    return create_job(job_request)
 
 
 @app.get("/jobs")
